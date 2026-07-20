@@ -16,6 +16,38 @@ Get medsos to a working state:
 Do **not** invent Meta app credentials. Do **not** commit `.env`, `medsos.db`,
 or logs. Do **not** print secrets in full — confirm presence/length only.
 
+## Gate 0 — human must supply Meta credentials first
+
+**Stop and ask the human before writing `.env` or starting the API** unless
+these are already present (non-empty) in an existing project/Hermes `.env`:
+
+| Credential | Env var | Source |
+|---|---|---|
+| Threads / Meta **App ID** | `MEDSOS_THREADS_META_APP_ID` | Human only — Meta developer app |
+| Threads / Meta **App Secret** | `MEDSOS_THREADS_META_APP_SECRET` | Human only — Meta developer app |
+| **Webhook verify token** | `MEDSOS_WEBHOOK_VERIFY_TOKEN` | Human chooses any secret string, **or** you generate one and show it once; human must enter the same value in Meta → Webhooks |
+
+Also get from the human (or confirm):
+
+- Public base URL → `MEDSOS_CALLBACK_URL_BASE` (HTTPS)
+- Active Hermes home/profile (`HERMES_HOME` if not default)
+
+You **may** generate without asking:
+
+- `MEDSOS_MASTER_KEY` (Fernet)
+- A random `MEDSOS_WEBHOOK_VERIFY_TOKEN` **if** the human agrees to paste it into Meta
+
+You **must not**:
+
+- Fabricate App ID / App Secret
+- Proceed to OAuth (`medsos_add_account`) with empty Meta credentials
+- Put real secrets in git, chat logs, or commit messages
+
+If the human does not have a Meta Threads app yet, pause setup and give them
+short instructions: create app at developers.facebook.com → add Threads →
+copy App ID + App Secret → later set webhook URL/verify token when public HTTPS
+exists. Resume at Gate 0 when they paste the values.
+
 ## Hard constraints
 
 - Two processes: **medsos API** and **Hermes**. They do not share env unless
@@ -54,13 +86,15 @@ systemctl --user is-active medsos.service 2>/dev/null || true
 ls -la "${HERMES_HOME:-$HOME/.hermes}/plugins/medsos" 2>/dev/null
 ```
 
-Ask the human only for what you cannot discover:
+Ask the human only for what you cannot discover (see **Gate 0**):
 
-- Meta App ID / App Secret / webhook verify token (or confirm already in `.env`)
-- Public base URL they will use (`MEDSOS_CALLBACK_URL_BASE`)
+- Meta App ID / App Secret (required; never invent)
+- Webhook verify token (or offer to generate + they paste into Meta)
+- Public base URL (`MEDSOS_CALLBACK_URL_BASE`)
 - Which Hermes home/profile is active
-- Whether they prefer systemd user unit vs foreground dev server
-- Whether reverse proxy/tunnel already exists
+- systemd vs foreground; existing reverse proxy/tunnel
+
+If Gate 0 values are missing, **do not start the playbook** — collect them first.
 
 ## Setup playbook (execute in order)
 
@@ -75,12 +109,15 @@ pip install -e ".[dev]"
 
 ### B. Configure `.env`
 
+**Prerequisite:** Gate 0 values in hand (App ID, App Secret, verify token, public base URL).
+
 ```sh
 cp -n .env.example .env
 chmod 600 .env
 ```
 
-Fill required keys (see README Configuration). Generate master key if empty:
+Write required keys (see README Configuration). Use the human’s Meta App ID and
+App Secret verbatim. Generate master key if empty:
 
 ```sh
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -88,6 +125,15 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 Prefer an **absolute** SQLite URL if cwd will vary, e.g.
 `sqlite:////home/<user>/medsos/medsos.db`.
+
+Sanity-check without dumping secrets:
+
+```sh
+grep -E '^MEDSOS_(THREADS_META_APP_ID|THREADS_META_APP_SECRET|WEBHOOK_VERIFY_TOKEN|CALLBACK_URL_BASE|MASTER_KEY)=' .env \
+  | sed -E 's/(SECRET|TOKEN|KEY)=.*/\1=<set>/'
+```
+
+All five lines should show non-empty / `<set>`. Then:
 
 ```sh
 alembic upgrade head

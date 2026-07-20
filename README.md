@@ -33,6 +33,24 @@ If an agent is helping you install this, point it at **[AGENTS.md](./AGENTS.md)*
 - A public HTTPS URL that can reach the medsos API (reverse proxy or tunnel)
 - A Meta developer app with Threads API access
 
+### Before you start — Meta credentials (human-supplied)
+
+medsos cannot create these for you. Get them from the
+[Meta developer dashboard](https://developers.facebook.com/) (Threads app)
+**before** filling `.env` or running OAuth:
+
+| You need | Env var | Who provides it |
+|---|---|---|
+| App ID | `MEDSOS_THREADS_META_APP_ID` | Human, from Meta app settings |
+| App Secret | `MEDSOS_THREADS_META_APP_SECRET` | Human, from Meta app settings |
+| Webhook verify token | `MEDSOS_WEBHOOK_VERIFY_TOKEN` | Human picks any random string (or agent generates one); human pastes the **same** value into Meta webhook settings |
+
+Also decide your public base URL (`MEDSOS_CALLBACK_URL_BASE`) up front — Meta
+OAuth redirect and webhook URL are derived from it.
+
+Agents helping with install: see [AGENTS.md](./AGENTS.md) — do not invent or
+guess App ID / App Secret.
+
 ## Quick start
 
 ```sh
