@@ -1,228 +1,126 @@
 # medsos
 
-A self-hosted **state engine** for social-media accounts, with a native
-[Hermes](https://github.com/suhz/hermes) plugin toolset.
+Self-hosted **state engine** for social accounts, with a native
+[Hermes Agent](https://hermes-agent.nousresearch.com/docs) plugin.
 
-medsos owns the things an AI agent needs to actually run a social-media account
-safely: a state database, a webhook receiver, OAuth onboarding, a platform
-client, and 12 tools that an agent can call directly. It deliberately owns
-**no** scheduler, **no** worker, **no** LLM — *when* and *whether* to process
-is your concern (a cron, an agent loop, a backfill). The agent decides what
-to say; medsos publishes it.
+medsos owns what an agent needs to run a social account safely: a state DB,
+webhook receiver, OAuth onboarding, platform client, and **12 tools**. It owns
+**no** scheduler, worker, or LLM — *when* and *whether* to act is yours (cron,
+agent loop, manual). The agent decides what to say; medsos publishes it.
 
-Threads is the v1 platform. X, Mastodon, and Bluesky are on the roadmap via a
-`Platform` protocol (see [Architecture](#architecture)).
+**v1 platform:** Threads. More platforms plug in via a `Platform` protocol later.
 
 ```text
-   META WEBHOOKS                                       AGENT
-        │                                                │
-        ▼                                                ▼
- ┌──────────────┐                                  ┌──────────────────┐
- │ /webhooks/   │  handshake + HMAC + ingest       │  medsos_find_…   │
- │   threads    │ ──────────────────────────────▶ │  medsos_publish_…│
- │              │                                  │  medsos_update_… │
- │ /accounts/   │  OAuth authorize + callback      │  medsos_delete_… │
- │   callback   │                                  │  medsos_get_…   │
- └──────┬───────┘                                  └────────┬─────────┘
-        │                                                  │
-        └──────────────┬───────────────────────┬───────────┘
-                       ▼                       ▼
-              ┌────────────────────────────────────┐
-              │  SQLite or PostgreSQL state DB    │
-              │  (posts, replies, accounts,       │
-              │   events, oauth_states)           │
-              └────────────────────────────────────┘
+  Meta webhooks / OAuth          Hermes agent (plugin tools)
+           │                              │
+           ▼                              ▼
+    ┌─────────────┐                medsos_find_*
+    │ medsos API  │                medsos_publish_*
+    │ :8768       │                medsos_update_* …
+    └──────┬──────┘                       │
+           └────────────┬─────────────────┘
+                        ▼
+              SQLite or PostgreSQL
+         (accounts, posts, replies, events)
 ```
 
-## Who is this for
+If an agent is helping you install this, point it at **[AGENTS.md](./AGENTS.md)**.
 
-- **Hermes agent builders** who want their agent to read, draft, post, and
-  reply on a social account without writing the platform plumbing.
-- **Self-hosters** who want full control over their social-media data, tokens,
-  and state — no third-party SaaS in the loop.
-- **Multi-platform tool authors** who want to add a new social platform by
-  writing a `Platform` adapter, not a new state engine.
+## Requirements
 
-## What you get
+- Python 3.11+
+- [Hermes Agent](https://hermes-agent.nousresearch.com/docs) already installed
+- A public HTTPS URL that can reach the medsos API (reverse proxy or tunnel)
+- A Meta developer app with Threads API access
 
-- A Flask service exposing `/webhooks/{platform}`, `/accounts/authorize`,
-  `/accounts/callback`, `/accounts`, and `/healthz`.
-- A Hermes plugin (`plugin/`) that registers 12 tools under toolset `medsos`.
-- A SQLAlchemy state model (SQLite or PostgreSQL) with Alembic migrations.
-- OAuth account onboarding (token stored encrypted at rest via Fernet).
-- A ported Threads Graph API client (2-step container→publish flow with the
-  mandatory ~30s settle; 401 → token refresh → retry).
-- An idempotent webhook ingest with HMAC verification, event-id deduplication,
-  and 4-field dispatch (`replies`, `mentions`, `publish`, `delete`).
-
-medsos does **not** include a scheduler, an LLM, or a worker. You bring your
-own loop.
-
-## Install
+## Quick start
 
 ```sh
-git clone <medsos> <your-path>        # or: pip install medsos
-cd <your-path>
+git clone https://github.com/suhz/medsos.git
+cd medsos
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 
 cp .env.example .env && chmod 600 .env
-# Edit .env — see Configuration below.
+# edit .env — see Configuration
 
-# Run migrations against your DB
 alembic upgrade head
-
-# Wire the Hermes plugin (discovers HERMES_HOME; no fixed folder)
-medsos-install
-
-# Dev: run the API in the foreground
-python scripts/serve.py
 ```
 
-The service binds `127.0.0.1:8768` by default. For a real install you still need:
+Then finish these three tracks (order matters for OAuth/webhooks):
 
-1. **`MEDSOS_*` in two places** — the API process and the Hermes process (they do not share env automatically). See [Configuration](#configuration) and [Hermes plugin setup](#hermes-plugin-setup).
-2. **An always-on API** — see [Run as a daemon](#run-as-a-daemon).
-3. **A public URL** for webhooks + OAuth — see [Reverse proxy](#reverse-proxy).
+1. **API up** — [Run the API](#run-the-api)
+2. **Public HTTPS** — [Reverse proxy](#reverse-proxy) + Meta dashboard URLs
+3. **Hermes plugin** — [Wire Hermes](#wire-hermes)
+
+Smoke path once all three are ready:
+
+```text
+agent: medsos_add_account
+you:   open authorize_url, approve in browser
+agent: medsos_find_accounts   → shows the connected account
+```
 
 ## Configuration
 
-All env vars are `MEDSOS_`-prefixed. Required:
+All vars are `MEDSOS_`-prefixed. Template: [`.env.example`](./.env.example).
 
-| Var | Purpose |
-|---|---|
-| `MEDSOS_DB_URL` | `sqlite:///./medsos.db` or `postgresql+psycopg://user:pass@host/db` |
-| `MEDSOS_MASTER_KEY` | Fernet key for token at-rest encryption. Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
-| `MEDSOS_THREADS_META_APP_ID` | Threads (Meta) App ID from the Meta developer dashboard |
-| `MEDSOS_THREADS_META_APP_SECRET` | Threads (Meta) App Secret |
-| `MEDSOS_WEBHOOK_VERIFY_TOKEN` | Webhook handshake token (set the same string in the Meta dashboard) |
-| `MEDSOS_CALLBACK_URL_BASE` | Public base URL the OAuth callback + webhook are reachable at (e.g. `https://medsos.example.com`) |
-
-Optional:
-
-| Var | Purpose |
-|---|---|
-| `MEDSOS_PUBLISH_WAIT` | Seconds between Threads container create and publish (default 30 — required by Threads) |
-| `MEDSOS_SHARE_DIR` | Local directory for image hosting (gates `upload_public`) |
-| `MEDSOS_SHARE_URL_BASE` | Public URL prefix for `MEDSOS_SHARE_DIR` |
-
-See `.env.example` for a copy-paste template.
+| Var | Required | Purpose |
+|---|---|---|
+| `MEDSOS_DB_URL` | yes | e.g. `sqlite:////var/lib/medsos/medsos.db` (prefer absolute paths) |
+| `MEDSOS_MASTER_KEY` | yes | Fernet key — `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `MEDSOS_THREADS_META_APP_ID` | yes | Meta app id |
+| `MEDSOS_THREADS_META_APP_SECRET` | yes | Meta app secret |
+| `MEDSOS_WEBHOOK_VERIFY_TOKEN` | yes | Any random string; same value in Meta webhook settings |
+| `MEDSOS_CALLBACK_URL_BASE` | yes | Public base URL, e.g. `https://medsos.example.com` |
+| `MEDSOS_PUBLISH_WAIT` | no | Seconds between Threads container create and publish (default `30`) |
+| `MEDSOS_SHARE_DIR` / `MEDSOS_SHARE_URL_BASE` | no | Local dir + public URL prefix for image hosting |
 
 ### Two processes, two env loads
 
 | Process | Needs `MEDSOS_*`? | Typical source |
 |---|---|---|
-| Flask API (`scripts/serve.py` / systemd) | yes | project `.env` via `EnvironmentFile=` or your process manager |
-| Hermes agent (plugin tools) | yes | `$HERMES_HOME/.env`, or the active profile at `~/.hermes/profiles/<name>/.env` |
+| medsos API | yes | project `.env` (`EnvironmentFile=` / process manager) |
+| Hermes (plugin tools) | yes | `$HERMES_HOME/.env` or `~/.hermes/profiles/<name>/.env` |
 
-Hermes does **not** read the medsos project `.env`. Copy the same keys (or symlink one file into both places). After changing Hermes env, restart Hermes (or use `/reload` where available). After changing the API's env, restart the API/daemon.
+Hermes does **not** read the medsos project `.env`. Copy the same keys (or
+symlink one file into both places). Restart each process after env changes.
 
-Absolute SQLite URLs are less surprising across cwd changes, e.g.
-`MEDSOS_DB_URL=sqlite:////var/lib/medsos/medsos.db`.
+## Run the API
 
-## Hermes plugin setup
-
-```sh
-# From the medsos checkout (sets HERMES_HOME if you use a profile):
-export HERMES_HOME="$HOME/.hermes/profiles/<name>"   # optional; default is ~/.hermes
-medsos-install
-```
-
-Then:
-
-1. **Enable the plugin** in Hermes config (`$HERMES_HOME/config.yaml`):
-
-   ```yaml
-   plugins:
-     enabled:
-       - medsos
-   ```
-
-2. **Put `MEDSOS_*` in the Hermes env file** Hermes actually loads:
-
-   - default home: `~/.hermes/.env`
-   - named profile: `~/.hermes/profiles/<name>/.env`
-
-   ```sh
-   # Example: append from the project .env (review before running)
-   grep '^MEDSOS_' .env >> "$HERMES_HOME/.env"
-   chmod 600 "$HERMES_HOME/.env"
-   ```
-
-3. **Restart Hermes** (CLI session and/or gateway) so the plugin and env load.
-
-4. **Smoke-check** from the agent: call `medsos_find_accounts` (empty list is fine before OAuth).
-
-`medsos-install` only creates the plugin symlink under `$HERMES_HOME/plugins/medsos`. It does not copy secrets and does not enable the plugin in `config.yaml`.
-
-## Run as a daemon
-
-`python scripts/serve.py` is fine for development. For Meta webhooks and OAuth you want something that stays up after logout.
-
-### systemd user unit (recommended)
-
-A template lives at [`deploy/medsos.service.example`](./deploy/medsos.service.example):
-
-```sh
-mkdir -p ~/.config/systemd/user
-cp deploy/medsos.service.example ~/.config/systemd/user/medsos.service
-
-# Edit REPLACE_MEDSOS_ROOT (and optional EnvironmentFile) to your paths.
-# Example EnvironmentFile options:
-#   EnvironmentFile=%h/src/medsos/.env
-#   EnvironmentFile=%h/.hermes/profiles/mybot/.env
-
-systemctl --user daemon-reload
-systemctl --user enable --now medsos.service
-
-# Survive SSH logout:
-loginctl enable-linger "$USER"
-
-curl -sS http://127.0.0.1:8768/healthz
-# → {"ok":true}
-
-systemctl --user status medsos.service
-journalctl --user -u medsos.service -f
-```
-
-Notes:
-
-- The example binds via `scripts/serve.py` on loopback only. Put nginx/Caddy (or a tunnel) in front — see [Reverse proxy](#reverse-proxy).
-- For heavier traffic, swap `ExecStart` for a real WSGI server, e.g.
-  `.../.venv/bin/gunicorn -b 127.0.0.1:8768 'medsos.web.app:create_app()'`.
-- `EnvironmentFile=` wants simple `KEY=VALUE` lines (no `export`, limited shell syntax).
-- Restart after env edits: `systemctl --user restart medsos.service`.
-
-### Foreground / other supervisors
+Dev (foreground):
 
 ```sh
 set -a && source .env && set +a
 python scripts/serve.py
-# or: gunicorn -b 127.0.0.1:8768 'medsos.web.app:create_app()'
+# listens on 127.0.0.1:8768
+curl -sS http://127.0.0.1:8768/healthz   # → {"ok":true}
 ```
 
-Docker, launchd, or a PaaS work the same way: inject `MEDSOS_*`, run the app, expose 8768 only to your reverse proxy.
+Daemon (systemd user unit):
 
-## First-run checklist
+```sh
+mkdir -p ~/.config/systemd/user
+cp deploy/medsos.service.example ~/.config/systemd/user/medsos.service
+# edit REPLACE_MEDSOS_ROOT (and EnvironmentFile if needed)
+systemctl --user daemon-reload
+systemctl --user enable --now medsos.service
+loginctl enable-linger "$USER"   # survive SSH logout
+```
 
-1. Fill project `.env` and run migrations.
-2. Start the API (foreground or systemd); `GET /healthz` returns ok.
-3. Point a public HTTPS name at `/webhooks/` and `/accounts/` (and usually `/healthz`).
-4. In the Meta developer app: set webhook URL + verify token; add OAuth redirect
-   `{MEDSOS_CALLBACK_URL_BASE}/accounts/callback`.
-5. `medsos-install`, enable plugin, copy `MEDSOS_*` into Hermes env, restart Hermes.
-6. From the agent: `medsos_add_account` → open `authorize_url` → approve →
-   `medsos_find_accounts` shows the new row.
+Optional: swap `ExecStart` for gunicorn under heavier load.
 
 ## Reverse proxy
 
-The Meta webhook and the OAuth callback must both reach the medsos service.
-With `MEDSOS_CALLBACK_URL_BASE=https://medsos.example.com`:
+Meta must reach:
 
-- `POST /webhooks/threads` — Meta's webhook delivery (HMAC-verified)
-- `GET /accounts/callback` — Meta's OAuth redirect (after the operator approves)
+| Path | Use |
+|---|---|
+| `POST {BASE}/webhooks/threads` | Webhook delivery (HMAC) |
+| `GET  {BASE}/accounts/callback` | OAuth redirect |
+| `GET  {BASE}/healthz` | Health (optional but handy) |
 
-A minimal nginx snippet:
+Minimal nginx:
 
 ```nginx
 location /webhooks/ { proxy_pass http://127.0.0.1:8768; }
@@ -230,225 +128,103 @@ location /accounts/ { proxy_pass http://127.0.0.1:8768; }
 location /healthz    { proxy_pass http://127.0.0.1:8768; }
 ```
 
-The webhook URL you register in the Meta dashboard is
-`{MEDSOS_CALLBACK_URL_BASE}/webhooks/threads`. The OAuth redirect URI is
-`{MEDSOS_CALLBACK_URL_BASE}/accounts/callback` (set automatically from
-`MEDSOS_CALLBACK_URL_BASE`).
+In the Meta app:
 
-## The 12 tools
+- Webhook URL = `{MEDSOS_CALLBACK_URL_BASE}/webhooks/threads`
+- Verify token = `MEDSOS_WEBHOOK_VERIFY_TOKEN`
+- OAuth redirect = `{MEDSOS_CALLBACK_URL_BASE}/accounts/callback`
 
-All tools are account-scoped (`account_id` required) **except** `add_account`
-and `find_accounts`. Tools return JSON strings and never raise out
-(matching the Hermes plugin contract).
+## Wire Hermes
 
-### Accounts
+```sh
+# if you use a named profile:
+export HERMES_HOME="$HOME/.hermes/profiles/<name>"
 
-| Tool | Input | Effect | Returns |
-|---|---|---|---|
-| `medsos_find_accounts` | `account_id?` | Find accounts — one if `account_id`, else all | `{"accounts": [{id, platform, username, status}, ...]}` |
-| `medsos_add_account` | `platform?` (default `threads`) | Start OAuth; returns the URL the operator follows | `{"authorize_url": "…", "state": "…"}` |
-
-Example:
-
-```json
-// medsos_add_account({})
-{"authorize_url": "https://threads.net/oauth/authorize?…&state=…", "state": "abc123"}
+medsos-install
 ```
 
-### Posts
+`medsos-install` only symlinks `plugin/` → `$HERMES_HOME/plugins/medsos`.
+It does **not** copy secrets or enable the plugin.
 
-| Tool | Input | Effect | Returns |
-|---|---|---|---|
-| `medsos_find_posts` | `account_id`, `post_id?`, `platform_media_id?`, `status?`, `limit?` | Find posts (filters: `draft`/`publishing`/`published`/`failed`) | `{"posts": [{post_id, status, text, media_urls, published_at, platform_media_id}, ...]}` |
-| `medsos_create_post` | `account_id`, `text`, `media_urls?` | Insert a draft post | `{"post_id": 42}` |
-| `medsos_update_post` | `account_id`, `post_id`, `text?`, `media_urls?` | Update a **draft** (draft-only — error if `status != 'draft'`) | `{"ok": true, "post_id": 42, "status": "draft"}` |
-| `medsos_publish_post` | `account_id`, `post_id?` or `text`, `media_urls?` | Publish to Threads (~30s, 2-step flow) | `{"ok": true, "post_id": 42, "platform_media_id": "…", "permalink": "…"}` |
-| `medsos_delete_post` | `account_id`, `post_id` | Delete on Threads + soft-flag locally | `{"ok": true, "deleted": true}` |
+1. Enable in `$HERMES_HOME/config.yaml`:
 
-### Replies
+   ```yaml
+   plugins:
+     enabled:
+       - medsos
+   ```
 
-| Tool | Input | Effect | Returns |
-|---|---|---|---|
-| `medsos_find_replies` | `account_id`, `reply_id?`, `direction?`, `status?`, `full?`, `limit?` | Find replies (filters: `inbound`/`outbound` + `status`); `full=true` returns the ordered thread (root post → … → this reply) per row | `{"replies": [{reply_id, direction, kind, status, text, author_username, parent_platform_id, root_platform_post_id, thread?}, ...]}` |
-| `medsos_publish_reply` | `account_id`, `reply_id`, `text`, `image?` | Reply to a known inbound reply (~30s) | `{"ok": true, "status": "published", "reply_platform_id": "…", "permalink": "…"}` |
-| `medsos_update_reply` | `account_id`, `reply_id`, `status`, `reason?` | Set reply status (`skipped`/`replied`/`failed`) + optional reason | `{"ok": true, "status": "skipped"}` |
-| `medsos_delete_reply` | `account_id`, `reply_id` | Delete on Threads + soft-flag locally | `{"ok": true, "deleted": true}` |
+2. Put `MEDSOS_*` in the env file Hermes loads:
 
-The automation loop is `find_replies(status='new', direction='inbound', limit=1, full=true)`
-→ process → `publish_reply` / `update_reply(status='skipped')`. The `full=true`
-flag returns the whole conversation as a `thread` array so the agent can
-draft with full context (including middle replies, not just the immediate
-parent).
+   ```sh
+   grep '^MEDSOS_' .env >> "$HERMES_HOME/.env"
+   chmod 600 "$HERMES_HOME/.env"
+   ```
 
-### Insights
+3. Restart Hermes (CLI and/or gateway).
 
-| Tool | Input | Effect | Returns |
-|---|---|---|---|
-| `medsos_get_insights` | `account_id`, `days?` | Read account-level insights (followers, views, likes, replies, reposts) | `{"followers_count": 42, "views": 100, ...}` |
+4. From the agent: `medsos_find_accounts` (empty list is fine before OAuth).
 
-## Architecture
+## Tools
 
-medsos is one always-on Flask service plus a Hermes plugin.
+Account-scoped except `medsos_add_account` / `medsos_find_accounts`.
+Handlers return JSON strings and never raise (Hermes plugin contract).
 
-### Storage
-
-| Table | Holds |
+| Tool | What it does |
 |---|---|
-| `accounts` | Connected accounts. `access_token` is encrypted at rest with the Fernet key in `MEDSOS_MASTER_KEY`. |
-| `posts` | Our own content (top-level). Status: `draft` → `publishing` → `published` (or `failed`). |
-| `replies` | All comments — both inbound (others to us) and outbound (our replies). One table; distinguished by `direction` + `status`. Linked by `parent_platform_id` to the immediate parent (post or reply) and `root_platform_post_id` to the root post. |
-| `events` | Webhook events, deduped by `platform_event_id`. |
-| `oauth_states` | Single-use CSRF tokens for the OAuth flow, 10-min TTL. |
+| `medsos_find_accounts` | List accounts, or one by `account_id` |
+| `medsos_add_account` | Start OAuth; returns `authorize_url` for the human |
+| `medsos_find_posts` | Filter by id / status / limit |
+| `medsos_create_post` | Insert draft |
+| `medsos_update_post` | Edit draft only |
+| `medsos_publish_post` | Publish draft or inline text (~30s Threads 2-step) |
+| `medsos_delete_post` | Delete remote + soft-flag local |
+| `medsos_find_replies` | Inbound/outbound; `full=true` returns thread context |
+| `medsos_publish_reply` | Reply to inbound `reply_id` (~30s) |
+| `medsos_update_reply` | Mark `skipped` / `replied` / `failed` |
+| `medsos_delete_reply` | Delete remote + soft-flag local |
+| `medsos_get_insights` | Account-level metrics |
 
-### Webhook ingest (the 4 official Threads fields)
+Typical reply loop:
 
-| Field | Source | Account mapping | Stored as |
-|---|---|---|---|
-| `replies` | someone replied to media we own | by `root_post.owner_id` | inbound reply node |
-| `mentions` | someone mentioned us | by mentioned user | inbound reply node (`kind='mentions'`) |
-| `publish` | we published media (post or reply) | by `value.username` | outbound post OR outbound reply node |
-| `delete` | our media was deleted | by `value.owner.owner_id` | soft-flag (`deleted_at`) on the matching post/reply |
-
-`replies`/`mentions` never carry our own activity (no self-suppression
-needed). Our outbound reaches us via `publish` only. The webhook handler is
-idempotent on the `event_id` (sha256 of `app_id:time:value.id:field`).
-
-### Tool layer
-
-```
-Hermes agent
-     │   tools.py  ←── JSON-always/never-raise handlers (12 of them)
-     ▼
-medsos.ops   ←── state transitions + DB writes + Threads client calls
-     │
-     ▼
-SQLAlchemy / Threads Graph API
+```text
+medsos_find_replies(account_id, status="new", direction="inbound", limit=1, full=true)
+  → draft with thread context
+  → medsos_publish_reply(...)  or  medsos_update_reply(..., status="skipped")
 ```
 
-The plugin's `tools.py` is a thin layer — it validates input, calls
-`medsos.ops.*`, and JSON-encodes the result. The plugin contract
-(`def handler(args: dict, **kwargs) -> str`) is satisfied end-to-end
-(see `tests/test_plugin_tools.py`).
+## How it fits together
 
-### Threads publish flow
+- **API process** — Flask on loopback: webhooks, OAuth, health.
+- **Hermes process** — plugin tools call `medsos.ops` → same DB + Threads Graph API.
+- **Tokens** — encrypted at rest with `MEDSOS_MASTER_KEY`.
+- **Webhooks** — HMAC-verified; idempotent on event id; fields: `replies`, `mentions`, `publish`, `delete`.
+- **Publish** — Threads requires container → wait ~30s → publish; 401 triggers token refresh and retry with the new token.
 
-Threads requires a 2-step publish: POST a container to `/{user_id}/threads`,
-wait ~30s, then POST `/{user_id}/threads_publish` with the `creation_id`.
-`medsos.platforms.threads.client.ThreadsClient.publish` orchestrates this
-and blocks for `MEDSOS_PUBLISH_WAIT` seconds (default 30). Token refresh
-on 401 is automatic; the retry uses the *new* token, not the stale one.
+medsos does not schedule work. Pair with Hermes cron, a gateway loop, or manual tool calls.
 
-## Status
+## Troubleshooting
 
-| Stage | Status |
+| Symptom | Likely cause |
 |---|---|
-| **Now** | Threads (v1) — 12 tools, OAuth, webhooks, 2-step publish, 401-refresh-retry, encrypted token storage, idempotent ingest. |
-| **Next** | X (Twitter) and Mastodon adapters (same `Platform` protocol, same 12 tools). Post-/comment-level insights. Per-world scheduler hooks. |
-| **Later** | Bluesky. Optional REST / MCP / CLI adapters over the tool layer. Multi-tenant mode. |
+| Plugin tools fail on settings / missing env | `MEDSOS_*` only in project `.env`, not Hermes env; restart Hermes after copy |
+| `medsos_find_accounts` → `[]` forever | OAuth not finished, or API/DB URL differs between processes |
+| OAuth callback `invalid or expired state` | API restarted or different DB than the one that stored `oauth_states` (10‑min TTL) |
+| Webhook handshake 403 | Verify token mismatch |
+| Webhook POST 401 | App secret mismatch / bad HMAC |
+| Publish “hangs” ~30s | Normal — `MEDSOS_PUBLISH_WAIT` |
+| Tools work, webhooks don’t | Public URL / proxy not reaching `:8768`, or Meta subscription not set |
 
-## Tests
+## Develop
 
 ```sh
 . .venv/bin/activate
-pytest -q
+pytest -q          # mocked; no live API
 ```
 
-64 tests, all HTTP mocked. No live API calls.
-
-| Test file | What it covers |
-|---|---|
-| `test_config.py` | MEDSOS_ env-var loading, required-field validation, defaults |
-| `test_crypto.py` | Fernet encrypt/decrypt round-trip, bad-key / bad-ciphertext error paths |
-| `test_models.py` | DB table creation, insert/select, unique constraints |
-| `test_install.py` | `medsos-install` discovers `HERMES_HOME`, creates/removes the plugin symlink |
-| `test_platforms_threads_client.py` | 2-step publish, 401-refresh-retry uses new token, delete, insights parsing |
-| `test_platforms_threads_auth.py` | OAuth authorize URL params, callback URL, structured exchange errors |
-| `test_platforms_threads_webhook.py` | 4-field dispatch, event-id stability, parse_account |
-| `test_ops.py` | All 12 operations, publish webhook race absorption, find_replies(full=true) |
-| `test_web_webhooks.py` | HMAC verify, handshake, idempotent ingest, publish adopts inflight post |
-| `test_web_accounts.py` | OAuth callback onboard + error surface |
-| `test_plugin_tools.py` / `test_plugin_register.py` | Plugin JSON contract + registration |
-## License
-
-MIT — see [`LICENSE`](./LICENSE).
-
-Copyright (c) 2026 Suhaimi Amir (suhz).
-
-You're free to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the software, subject to keeping the copyright and
-permission notice in all copies. The software is provided "as is", without
-warranty of any kind.
-## Layout
-
-```
-medsos/
-├── pyproject.toml              # deps + medsos-install console script
-├── .env.example                # MEDSOS_* template
-├── alembic.ini
-├── README.md                   # you are here
-├── deploy/
-│   └── medsos.service.example  # systemd user unit template
-├── src/medsos/
-│   ├── config.py               # pydantic-settings Settings
-│   ├── crypto.py               # Fernet encrypt/decrypt
-│   ├── db.py                   # SQLAlchemy engine + session factory
-│   ├── models.py               # Account, Post, Reply, Event, OauthState
-│   ├── state.py                # transition invariants
-│   ├── ops.py                  # the 12 operations
-│   ├── onboarding.py           # shared authorize-URL + state-persistence helper
-│   ├── install.py              # medsos-install (HERMES_HOME discovery)
-│   ├── platforms/
-│   │   ├── base.py             # Platform protocol
-│   │   └── threads/            # Threads implementation
-│   │       ├── client.py       # Graph API client (2-step publish, 401-retry)
-│   │       ├── auth.py         # OAuth authorize + exchange
-│   │       └── webhook.py      # 4-field normalizer
-│   └── web/                    # Flask service
-│       ├── app.py              # app factory
-│       ├── webhooks.py         # /webhooks/{platform}
-│       ├── accounts.py         # /accounts/{authorize,callback,list}
-│       └── health.py           # /healthz
-├── plugin/                     # Hermes plugin
-│   ├── plugin.yaml             # toolset `medsos`, 12 provides_tools
-│   ├── __init__.py             # register(ctx) — dual import
-│   ├── schemas.py              # 12 tool schemas (LLM-facing)
-│   └── tools.py                # 12 handlers → medsos.ops
-├── migrations/                 # Alembic
-│   ├── env.py
-│   ├── script.py.mako
-│   └── versions/
-│       ├── 001_initial_accounts_posts_replies_events.py
-│       └── 002_add_oauth_states.py
-├── scripts/
-│   ├── serve.py                # Flask entrypoint
-│   └── account.py              # CLI: list accounts
-└── tests/                      # mocked unit/integration tests
-```
-
-## Adding a new platform
-
-1. Implement `Platform` (`src/medsos/platforms/base.py`) for the new platform.
-2. Reuse the unified-reply model in `models.py` and the state machine in
-   `state.py` — they are platform-agnostic.
-3. Reuse the webhook `Event` table and idempotency for ingest.
-4. The 12 tools don't change. Your agent's code stays the same.
-
-## Contributing
-
-PRs welcome. A few things that will speed up review:
-
-- One task per commit (or a few related ones). TDD where it makes sense
-  (a failing test in the same commit as the fix).
-- Don't add scope to a task. YAGNI — the design is intentionally narrow.
-- All env vars are `MEDSOS_`-prefixed.
-- New platform adapters implement `Platform`; the tool layer is unchanged.
-
-For bugs, open an issue with the failing scenario, the expected behavior,
-and the actual behavior. A reproduction (even a single `pytest` case) is
-worth a hundred words.
+Layout worth knowing: `plugin/` (Hermes), `src/medsos/` (ops + platforms + web),
+`deploy/medsos.service.example`, `scripts/serve.py`.
 
 ## License
 
-Pick whatever you want for your fork — medsos itself is provided as-is.
-(The vendored `_forum_ai_*.json` corpus in some forks is MIT; check the
-specific files you ship.)
+MIT — see [LICENSE](./LICENSE). Copyright (c) 2026 Suhaimi Amir (suhz).
