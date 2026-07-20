@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.env
+state/
+.coverage
+htmlcov/
+build/
+dist/
+# Local runtime files (SQLite db + flask dev server log)
+medsos.db
+serve.log
+# Local scratch / brainstorm notes (never commit)
+idea.md
+review1.md
+.superpowers/sdd/

@@ -1,0 +1,39 @@
+name: medsos
+version: 0.1.0
+description: "Medsos — state engine + Threads toolset for Hermes agents"
+author: medsos
+provides_tools:
+  - medsos_find_accounts
+  - medsos_add_account
+  - medsos_find_posts
+  - medsos_create_post
+  - medsos_update_post
+  - medsos_publish_post
+  - medsos_delete_post
+  - medsos_find_replies
+  - medsos_publish_reply
+  - medsos_update_reply
+  - medsos_delete_reply
+  - medsos_get_insights
+requires_env:
+  - name: MEDSOS_DB_URL
+    description: "SQLAlchemy database URL (e.g. sqlite:///./medsos.db)"
+  - name: MEDSOS_MASTER_KEY
+    description: "Fernet master key for token at-rest encryption"
+    secret: true
+optional_env:
+  - name: MEDSOS_THREADS_META_APP_ID
+    description: "Threads Meta app id"
+  - name: MEDSOS_THREADS_META_APP_SECRET
+    description: "Threads Meta app secret"
+    secret: true
+  - name: MEDSOS_WEBHOOK_VERIFY_TOKEN
+    description: "Meta webhook handshake token"
+  - name: MEDSOS_CALLBACK_URL_BASE
+    description: "Public base URL the OAuth callback + webhook are reachable at"
+  - name: MEDSOS_SHARE_DIR
+    description: "Local image hosting dir (gates upload_public)"
+  - name: MEDSOS_SHARE_URL_BASE
+    description: "Public URL prefix for MEDSOS_SHARE_DIR"
+  - name: MEDSOS_PUBLISH_WAIT
+    description: "Seconds to wait between container create and publish (default 30)"

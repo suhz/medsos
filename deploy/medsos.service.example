@@ -1,0 +1,31 @@
+# Example systemd *user* unit for the medsos Flask service.
+#
+# 1. Copy and edit paths:
+#      cp deploy/medsos.service.example ~/.config/systemd/user/medsos.service
+# 2. systemctl --user daemon-reload
+# 3. systemctl --user enable --now medsos.service
+# 4. curl -sS http://127.0.0.1:8768/healthz
+#
+# Linger (so the unit survives logout):
+#      loginctl enable-linger "$USER"
+#
+# Replace every REPLACE_* placeholder before enabling.
+
+[Unit]
+Description=medsos — Threads OAuth + webhook service (127.0.0.1:8768)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=REPLACE_MEDSOS_ROOT
+# Project .env (default). Or point at a Hermes profile env that already
+# contains MEDSOS_* — e.g. %h/.hermes/profiles/REPLACE_PROFILE/.env
+EnvironmentFile=REPLACE_MEDSOS_ROOT/.env
+ExecStart=REPLACE_MEDSOS_ROOT/.venv/bin/python scripts/serve.py
+Restart=always
+RestartSec=3
+
+# Loopback only — put nginx/caddy (or a tunnel) in front for Meta webhooks/OAuth.
+
+[Install]
+WantedBy=default.target
